@@ -29,11 +29,13 @@ public class Main {
         AkkaManagement.get(system).start();
         ClusterBootstrap.get(system).start();
 
+        ShoppingCart.init(system);
+
         // Configファイルから必要な情報をとり、gRPCサーバーを起動する
         Config config = system.settings().config();
         String grpcInterface = config.getString("shopping-cart-service.grpc.interface");
         int grpcPort = config.getInt("shopping-cart-service.grpc.port");
-        ShoppingCartService grpcService = new ShoppingCartServiceImpl();
+        ShoppingCartService grpcService = new ShoppingCartServiceImpl(system);
         ShoppingCartServer.start(grpcInterface, grpcPort, system, grpcService);
     }
 }
