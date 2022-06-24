@@ -13,6 +13,7 @@ import akka.persistence.typed.PersistenceId;
 import akka.persistence.typed.javadsl.CommandHandlerWithReply;
 import akka.persistence.typed.javadsl.CommandHandlerWithReplyBuilder;
 import akka.persistence.typed.javadsl.EventHandler;
+import akka.persistence.typed.javadsl.EventHandlerBuilder;
 import akka.persistence.typed.javadsl.EventSourcedBehavior;
 import akka.persistence.typed.javadsl.EventSourcedBehaviorWithEnforcedReplies;
 import akka.persistence.typed.javadsl.ReplyEffect;
@@ -29,19 +30,23 @@ public final class ShoppingCart extends EventSourcedBehaviorWithEnforcedReplies<
 
     private final String cartId;
 
+    // Akkaクラスタのクラスターシャーディングを用いて各クラスタノードにカートエンティティを生成させる
     public static void init(ActorSystem<?> system) {
         ClusterSharding.get(system).init(Entity.of(ENTITY_KEY, entityContext -> ShoppingCart.create(entityContext.getEntityId())));
     }
 
+    // ShoppingCartオブジェクトを生成する
     public static Behavior<Command> create(String cartId) {
         return Behaviors.setup(ctx -> EventSourcedBehavior.start(new ShoppingCart(cartId), ctx));
     }
 
+    // snapshotによってCartEntityを最新の状態に復旧させる
     @Override
     public RetentionCriteria retentionCriteria() {
         return RetentionCriteria.snapshotEvery(100, 3);
     }
 
+    // ShoppingCartのコンストラクタ。復旧に失敗した場合は状態をリセットするように設定する
     private ShoppingCart(String cartId) {
         super(PersistenceId.of(ENTITY_KEY.name(), cartId), SupervisorStrategy.restartWithBackoff(Duration.ofMillis(200), Duration.ofSeconds(5), 0.1));
         this.cartId = cartId;
@@ -52,9 +57,11 @@ public final class ShoppingCart extends EventSourcedBehaviorWithEnforcedReplies<
         return new State();
     }
 
+    // Shopping Cartアクターをサポートする全てのコマンドのインタフェース
     interface Command extends CborSerializable {
     }
 
+    // カートに商品を追加するコマンド。StatusReply<Summary> はコマンドによってイベントが発行されて正常に永続化されたときのレスポンスになる
     public static final class AddItem implements Command {
         final String itemId;
         final int quantity;
@@ -67,6 +74,7 @@ public final class ShoppingCart extends EventSourcedBehaviorWithEnforcedReplies<
         }
     }
 
+    // ショッピングカートの状態の概要. 応答メッセージとして利用する
     public static final class Summary implements CborSerializable {
         final Map<String, Integer> items;
 
@@ -171,7 +179,10 @@ public final class ShoppingCart extends EventSourcedBehaviorWithEnforcedReplies<
 
     @Override
     public EventHandler<State, Event> eventHandler() {
-        return newEventHandlerBuilder().forAnyState().onEvent(ItemAdded.class, (state, evt) -> state.updateItem(evt.itemId, evt.quantity)).build();
+        EventHandlerBuilder<State,Event> builder = new EventHandlerBuilder<>();
+        builder.forAnyState().onEvent(ItemAdded.class, (state, event) -> state.updateItem(event.itemId, event.quantity));
+        return builder.build();
+//        return newEventHandlerBuilder().forAnyState().onEvent(ItemAdded.class, (state, evt) -> state.updateItem(evt.itemId, evt.quantity)).build();
     }
 }
 
