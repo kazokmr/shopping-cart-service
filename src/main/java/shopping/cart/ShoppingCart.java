@@ -11,9 +11,8 @@ import akka.cluster.sharding.typed.javadsl.EntityTypeKey;
 import akka.pattern.StatusReply;
 import akka.persistence.typed.PersistenceId;
 import akka.persistence.typed.javadsl.CommandHandlerWithReply;
-import akka.persistence.typed.javadsl.CommandHandlerWithReplyBuilder;
+import akka.persistence.typed.javadsl.CommandHandlerWithReplyBuilderByState;
 import akka.persistence.typed.javadsl.EventHandler;
-import akka.persistence.typed.javadsl.EventHandlerBuilder;
 import akka.persistence.typed.javadsl.EventSourcedBehavior;
 import akka.persistence.typed.javadsl.EventSourcedBehaviorWithEnforcedReplies;
 import akka.persistence.typed.javadsl.ReplyEffect;
@@ -21,8 +20,11 @@ import akka.persistence.typed.javadsl.RetentionCriteria;
 import com.fasterxml.jackson.annotation.JsonCreator;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 
 public final class ShoppingCart extends EventSourcedBehaviorWithEnforcedReplies<ShoppingCart.Command, ShoppingCart.Event, ShoppingCart.State> {
 
@@ -74,13 +76,36 @@ public final class ShoppingCart extends EventSourcedBehaviorWithEnforcedReplies<
         }
     }
 
+    // カートの商品を購入するコマンド
+    public static final class Checkout implements Command {
+        final ActorRef<StatusReply<Summary>> replyTo;
+
+        @JsonCreator
+        public Checkout(ActorRef<StatusReply<Summary>> replyTo) {
+            this.replyTo = replyTo;
+        }
+    }
+
+    // 現在のCartの状態を取得するコマンド。イベントを呼ばずに状態だけを返す
+    public static final class Get implements Command {
+        final ActorRef<Summary> replyTo;
+
+        @JsonCreator
+        public Get(ActorRef<Summary> replyTo) {
+            this.replyTo = replyTo;
+        }
+    }
+
+
     // ショッピングカートの状態の概要. 応答メッセージとして利用する
     public static final class Summary implements CborSerializable {
         final Map<String, Integer> items;
+        final boolean checkedOut;
 
         @JsonCreator
-        public Summary(Map<String, Integer> items) {
+        public Summary(Map<String, Integer> items, boolean checkedOut) {
             this.items = new HashMap<>(items);
+            this.checkedOut = checkedOut;
         }
     }
 
@@ -123,15 +148,49 @@ public final class ShoppingCart extends EventSourcedBehaviorWithEnforcedReplies<
         }
     }
 
-    static final class State implements CborSerializable {
-        final Map<String, Integer> items;
+    static final class CheckedOut extends Event {
 
-        public State() {
-            this(new HashMap<>());
+        final Instant eventTime;
+
+        public CheckedOut(String cartId, Instant eventTime) {
+            super(cartId);
+            this.eventTime = eventTime;
         }
 
-        public State(Map<String, Integer> items) {
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            CheckedOut that = (CheckedOut) o;
+            return Objects.equals(eventTime, that.eventTime);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(eventTime);
+        }
+    }
+
+    static final class State implements CborSerializable {
+        final Map<String, Integer> items;
+        private Optional<Instant> checkoutDate;
+
+        public State() {
+            this(new HashMap<>(), Optional.empty());
+        }
+
+        public State(Map<String, Integer> items, Optional<Instant> checkoutDate) {
             this.items = items;
+            this.checkoutDate = checkoutDate;
+        }
+
+        public boolean isCheckedOut() {
+            return checkoutDate.isPresent();
+        }
+
+        public State checkout(Instant now) {
+            checkoutDate = Optional.of(now);
+            return this;
         }
 
         public boolean hasItem(String itemId) {
@@ -148,7 +207,7 @@ public final class ShoppingCart extends EventSourcedBehaviorWithEnforcedReplies<
         }
 
         public Summary toSummary() {
-            return new Summary(items);
+            return new Summary(items, isCheckedOut());
         }
 
         public int itemCount(String itemId) {
@@ -162,9 +221,44 @@ public final class ShoppingCart extends EventSourcedBehaviorWithEnforcedReplies<
 
     @Override
     public CommandHandlerWithReply<Command, Event, State> commandHandler() {
-        CommandHandlerWithReplyBuilder<Command, Event, State> builder = new CommandHandlerWithReplyBuilder<>();
-        builder.forAnyState().onCommand(AddItem.class, this::onAddItem);
-        return builder.build();
+        return openShoppingCart()
+                .orElse(checkedOutShoppingCart())
+                .orElse(getCommandHandler())
+                .build();
+    }
+
+    // Checkoutがまだならコマンドを受け付ける
+
+    private CommandHandlerWithReplyBuilderByState<Command, Event, State, State> openShoppingCart() {
+        return newCommandHandlerWithReplyBuilder()
+                .forState(state -> !state.isCheckedOut())
+                .onCommand(AddItem.class, this::onAddItem)
+                .onCommand(Checkout.class, this::onCheckout);
+    }
+
+    // Checkout済なら全てのコマンドを受け付けない
+    private CommandHandlerWithReplyBuilderByState<Command, Event, State, State> checkedOutShoppingCart() {
+        return newCommandHandlerWithReplyBuilder()
+                .forState(State::isCheckedOut)
+                .onCommand(
+                        AddItem.class,
+                        cmd -> Effect().reply(
+                                cmd.replayTo,
+                                StatusReply.error("Can't add an item to an already checked out shopping cart")
+                        )
+                )
+                .onCommand(Checkout.class,
+                        cmd -> Effect().reply(
+                                cmd.replyTo,
+                                StatusReply.error("Can't checkout already checked out shopping cart")
+                        )
+                );
+    }
+
+    private CommandHandlerWithReplyBuilderByState<Command, Event, State, State> getCommandHandler() {
+        return newCommandHandlerWithReplyBuilder()
+                .forAnyState()
+                .onCommand(Get.class, (state, cmd) -> Effect().reply(cmd.replyTo, state.toSummary()));
     }
 
     private ReplyEffect<Event, State> onAddItem(State state, AddItem cmd) {
@@ -177,12 +271,20 @@ public final class ShoppingCart extends EventSourcedBehaviorWithEnforcedReplies<
         }
     }
 
+    private ReplyEffect<Event, State> onCheckout(State state, Checkout cmd) {
+        if (state.isEmpty()) {
+            return Effect().reply(cmd.replyTo, StatusReply.error("Cannot checkout an empty shopping cart"));
+        }
+        return Effect().persist(new CheckedOut(cartId, Instant.now())).thenReply(cmd.replyTo, updateCart -> StatusReply.success(updateCart.toSummary()));
+    }
+
     @Override
     public EventHandler<State, Event> eventHandler() {
-        EventHandlerBuilder<State,Event> builder = new EventHandlerBuilder<>();
-        builder.forAnyState().onEvent(ItemAdded.class, (state, event) -> state.updateItem(event.itemId, event.quantity));
-        return builder.build();
-//        return newEventHandlerBuilder().forAnyState().onEvent(ItemAdded.class, (state, evt) -> state.updateItem(evt.itemId, evt.quantity)).build();
+        return newEventHandlerBuilder()
+                .forAnyState()
+                .onEvent(ItemAdded.class, (state, evt) -> state.updateItem(evt.itemId, evt.quantity))
+                .onEvent(CheckedOut.class, (state, evt) -> state.checkout(evt.eventTime))
+                .build();
     }
 }
 

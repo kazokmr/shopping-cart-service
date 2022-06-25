@@ -9,6 +9,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import shopping.cart.proto.AddItemRequest;
 import shopping.cart.proto.Cart;
+import shopping.cart.proto.CheckoutRequest;
+import shopping.cart.proto.GetCartRequest;
 import shopping.cart.proto.Item;
 import shopping.cart.proto.ShoppingCartService;
 
@@ -39,9 +41,45 @@ public final class ShoppingCartServiceImpl implements ShoppingCartService {
         return convertError(cart);
     }
 
+    @Override
+    public CompletionStage<Cart> checkout(CheckoutRequest in) {
+        logger.info("checkout {}", in.getCartId());
+        EntityRef<ShoppingCart.Command> entityRef = sharding.entityRefFor(ShoppingCart.ENTITY_KEY, in.getCartId());
+        CompletionStage<ShoppingCart.Summary> reply = entityRef.askWithStatus(ShoppingCart.Checkout::new, timeout);
+        CompletionStage<Cart> cart = reply.thenApply(ShoppingCartServiceImpl::toProtoCart);
+        return convertError(cart);
+    }
+
+    @Override
+    public CompletionStage<Cart> getCart(GetCartRequest in) {
+        logger.info("getCart {}", in.getCartId());
+        EntityRef<ShoppingCart.Command> entityRef = sharding.entityRefFor(ShoppingCart.ENTITY_KEY, in.getCartId());
+        CompletionStage<ShoppingCart.Summary> reply = entityRef.ask(ShoppingCart.Get::new, timeout);
+        CompletionStage<Cart> protoCart =
+                reply.thenApply(
+                        cart -> {
+                            if (cart.items.isEmpty())
+                                throw new GrpcServiceException(Status.NOT_FOUND.withDescription("Cart " + in.getCartId() + " not found"));
+                            else return toProtoCart(cart);
+                        }
+                );
+        return convertError(protoCart);
+    }
+
     private static Cart toProtoCart(ShoppingCart.Summary cart) {
-        List<Item> protoItems = cart.items.entrySet().stream().map(entry -> Item.newBuilder().setItemId(entry.getKey()).setQuantity(entry.getValue()).build()).collect(Collectors.toList());
-        return Cart.newBuilder().addAllItems(protoItems).build();
+        List<Item> protoItems =
+                cart.items.entrySet().stream()
+                        .map(
+                                entry ->
+                                        Item.newBuilder()
+                                                .setItemId(entry.getKey())
+                                                .setQuantity(entry.getValue())
+                                                .build())
+                        .collect(Collectors.toList());
+        return Cart.newBuilder()
+                .setCheckedOut(cart.checkedOut)
+                .addAllItems(protoItems)
+                .build();
     }
 
     private static <T> CompletionStage<T> convertError(CompletionStage<T> response) {
