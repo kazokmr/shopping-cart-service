@@ -21,25 +21,51 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 public final class ShoppingCart extends EventSourcedBehaviorWithEnforcedReplies<ShoppingCart.Command, ShoppingCart.Event, ShoppingCart.State> {
 
     static final EntityTypeKey<Command> ENTITY_KEY = EntityTypeKey.create(Command.class, "ShoppingCart");
 
-    private final String cartId;
+    // Projectionインタンスに付けるTagのリスト
+    static final List<String> TAGS = List.of("carts-0", "carts-1", "carts-2", "carts-3", "carts-4");
 
     // Akkaクラスタのクラスターシャーディングを用いて各クラスタノードにカートエンティティを生成させる
     public static void init(ActorSystem<?> system) {
-        ClusterSharding.get(system).init(Entity.of(ENTITY_KEY, entityContext -> ShoppingCart.create(entityContext.getEntityId())));
+        ClusterSharding.get(system)
+                .init(
+                        Entity.of(
+                                ENTITY_KEY,
+                                // Entityのハッシュ値からどのTagに割り当てるかを決める。同じEntityは同じProjectionインスタンスで処理させたいため.
+                                entityContext -> {
+                                    int i = Math.abs(entityContext.getEntityId().hashCode() % TAGS.size());
+                                    String selectedTag = TAGS.get(i);
+                                    return ShoppingCart.create(entityContext.getEntityId(), selectedTag);
+                                }));
     }
 
     // ShoppingCartオブジェクトを生成する
-    public static Behavior<Command> create(String cartId) {
-        return Behaviors.setup(ctx -> EventSourcedBehavior.start(new ShoppingCart(cartId), ctx));
+    public static Behavior<Command> create(String cartId, String projectionTag) {
+        return Behaviors.setup(ctx -> EventSourcedBehavior.start(new ShoppingCart(cartId, projectionTag), ctx));
+    }
+
+    private final String cartId;
+
+    private final String projectionTag;
+
+    // ShoppingCartのコンストラクタ。復旧に失敗した場合は状態をリセットするように設定する
+    private ShoppingCart(String cartId, String projectionTag) {
+        super(
+                PersistenceId.of(ENTITY_KEY.name(), cartId),
+                SupervisorStrategy.restartWithBackoff(Duration.ofMillis(200), Duration.ofSeconds(5), 0.1));
+        this.cartId = cartId;
+        this.projectionTag = projectionTag;
     }
 
     // snapshotによってCartEntityを最新の状態に復旧させる
@@ -48,15 +74,16 @@ public final class ShoppingCart extends EventSourcedBehaviorWithEnforcedReplies<
         return RetentionCriteria.snapshotEvery(100, 3);
     }
 
-    // ShoppingCartのコンストラクタ。復旧に失敗した場合は状態をリセットするように設定する
-    private ShoppingCart(String cartId) {
-        super(PersistenceId.of(ENTITY_KEY.name(), cartId), SupervisorStrategy.restartWithBackoff(Duration.ofMillis(200), Duration.ofSeconds(5), 0.1));
-        this.cartId = cartId;
-    }
-
+    // 状態をリセットする
     @Override
     public State emptyState() {
         return new State();
+    }
+
+    // projectionTagをTagに割り当てる
+    @Override
+    public Set<String> tagsFor(Event event) {
+        return Collections.singleton(projectionTag);
     }
 
     // Shopping Cartアクターをサポートする全てのコマンドのインタフェース
@@ -228,7 +255,6 @@ public final class ShoppingCart extends EventSourcedBehaviorWithEnforcedReplies<
     }
 
     // Checkoutがまだならコマンドを受け付ける
-
     private CommandHandlerWithReplyBuilderByState<Command, Event, State, State> openShoppingCart() {
         return newCommandHandlerWithReplyBuilder()
                 .forState(state -> !state.isCheckedOut())

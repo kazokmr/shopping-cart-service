@@ -1,6 +1,7 @@
 package shopping.cart;
 
 import akka.actor.typed.ActorSystem;
+import akka.actor.typed.DispatcherSelector;
 import akka.cluster.sharding.typed.javadsl.ClusterSharding;
 import akka.cluster.sharding.typed.javadsl.EntityRef;
 import akka.grpc.GrpcServiceException;
@@ -11,12 +12,18 @@ import shopping.cart.proto.AddItemRequest;
 import shopping.cart.proto.Cart;
 import shopping.cart.proto.CheckoutRequest;
 import shopping.cart.proto.GetCartRequest;
+import shopping.cart.proto.GetItemPopularityRequest;
+import shopping.cart.proto.GetItemPopularityResponse;
 import shopping.cart.proto.Item;
 import shopping.cart.proto.ShoppingCartService;
+import shopping.cart.repository.ItemPopularityRepository;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
@@ -24,10 +31,16 @@ public final class ShoppingCartServiceImpl implements ShoppingCartService {
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
 
+    private final ItemPopularityRepository repository;
+    private final Executor blockingJdbcExecutor;
     private final Duration timeout;
     private final ClusterSharding sharding;
 
-    public ShoppingCartServiceImpl(ActorSystem<?> system) {
+    public ShoppingCartServiceImpl(ActorSystem<?> system, ItemPopularityRepository repository) {
+
+        DispatcherSelector dispatcherSelector = DispatcherSelector.fromConfig("akka.projection.jdbc.blocking-jdbc-dispatcher");
+        this.blockingJdbcExecutor = system.dispatchers().lookup(dispatcherSelector);
+        this.repository = repository;
         timeout = system.settings().config().getDuration("shopping-cart-service.ask-timeout");
         sharding = ClusterSharding.get(system);
     }
@@ -64,6 +77,21 @@ public final class ShoppingCartServiceImpl implements ShoppingCartService {
                         }
                 );
         return convertError(protoCart);
+    }
+
+    @Override
+    public CompletionStage<GetItemPopularityResponse> getItemPopularity(GetItemPopularityRequest in) {
+        CompletionStage<Optional<ItemPopularity>> itemPopularity =
+                CompletableFuture.supplyAsync(
+                        () -> repository.findById(in.getItemId()), blockingJdbcExecutor
+                );
+
+        return itemPopularity.thenApply(
+                popularity -> {
+                    long count = popularity.map(ItemPopularity::getCount).orElse(0L);
+                    return GetItemPopularityResponse.newBuilder().setPopularityCount(count).build();
+                }
+        );
     }
 
     private static Cart toProtoCart(ShoppingCart.Summary cart) {
