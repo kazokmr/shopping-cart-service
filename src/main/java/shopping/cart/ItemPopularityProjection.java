@@ -48,8 +48,8 @@ public final class ItemPopularityProjection {
             JpaTransactionManager transactionManager,
             ItemPopularityRepository repository,
             int index) {
-        String tag = ShoppingCart.TAGS.get(index);      // インスタンスのIndexからTagを取得する
 
+        String tag = ShoppingCart.TAGS.get(index);      // インスタンスのIndexからTagを取得する
         SourceProvider<Offset, EventEnvelope<ShoppingCart.Event>> sourceProvider =
                 EventSourcedProvider.eventsByTag(
                         system,

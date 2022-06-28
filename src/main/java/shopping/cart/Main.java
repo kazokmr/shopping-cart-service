@@ -35,10 +35,13 @@ public class Main {
 
         ShoppingCart.init(system);
 
+        // Projectionの初期化
         ApplicationContext springContext = SpringIntegration.applicationContext(system);
         ItemPopularityRepository itemPopularityRepository = springContext.getBean(ItemPopularityRepository.class);
         JpaTransactionManager transactionManager = springContext.getBean(JpaTransactionManager.class);
+
         ItemPopularityProjection.init(system, transactionManager, itemPopularityRepository);
+        PublishEventsProjection.init(system, transactionManager);
 
         // Configファイルから必要な情報をとり、gRPCサーバーを起動する
         Config config = system.settings().config();
