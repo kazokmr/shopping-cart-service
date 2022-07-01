@@ -2,6 +2,7 @@ package shopping.cart;
 
 import akka.actor.typed.ActorSystem;
 import akka.actor.typed.javadsl.Behaviors;
+import akka.grpc.GrpcClientSettings;
 import akka.management.cluster.bootstrap.ClusterBootstrap;
 import akka.management.javadsl.AkkaManagement;
 import com.typesafe.config.Config;
@@ -12,6 +13,8 @@ import org.springframework.orm.jpa.JpaTransactionManager;
 import shopping.cart.proto.ShoppingCartService;
 import shopping.cart.repository.ItemPopularityRepository;
 import shopping.cart.repository.SpringIntegration;
+import shopping.order.proto.ShoppingOrderService;
+import shopping.order.proto.ShoppingOrderServiceClient;
 
 public class Main {
 
@@ -42,6 +45,7 @@ public class Main {
 
         ItemPopularityProjection.init(system, transactionManager, itemPopularityRepository);
         PublishEventsProjection.init(system, transactionManager);
+        SendOrderProjection.init(system, transactionManager, orderServiceClient(system));
 
         // Configファイルから必要な情報をとり、gRPCサーバーを起動する
         Config config = system.settings().config();
@@ -49,5 +53,16 @@ public class Main {
         int grpcPort = config.getInt("shopping-cart-service.grpc.port");
         ShoppingCartService grpcService = new ShoppingCartServiceImpl(system, itemPopularityRepository);
         ShoppingCartServer.start(grpcInterface, grpcPort, system, grpcService);
+    }
+
+    static ShoppingOrderService orderServiceClient(ActorSystem<?> system) {
+        GrpcClientSettings orderServiceClientSettings =
+                GrpcClientSettings.connectToServiceAt(
+                                system.settings().config().getString("shopping-order-service.host"),
+                                system.settings().config().getInt("shopping-order-service.port"),
+                                system
+                        )
+                        .withTls(false);
+        return ShoppingOrderServiceClient.create(orderServiceClientSettings, system);
     }
 }
